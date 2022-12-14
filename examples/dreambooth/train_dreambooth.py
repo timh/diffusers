@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import inspect
 import itertools
 import math
 import os
@@ -150,6 +151,8 @@ def parse_args(input_args=None):
         default=None,
         help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
     )
+    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
+    parser.add_argument("--save_epochs", type=int, default=0, help="Save a checkpoint every X epochs.")
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
@@ -298,6 +301,12 @@ class DreamBoothDataset(Dataset):
             self.class_data_root = Path(class_data_root)
             self.class_data_root.mkdir(parents=True, exist_ok=True)
             self.class_images_path = list(self.class_data_root.iterdir())
+
+            num_class_multiple = int(len(self.class_images_path) / self.num_instance_images) * self.num_instance_images
+            if num_class_multiple != len(self.class_images_path):
+                warnings.warn(f"Truncating {len(self.class_images_path)} class images to {num_class_multiple}, to ensure multiple of num_instance_instances={self.num_instance_images}")
+                self.class_images_path = self.class_images_path[:num_class_multiple]
+
             self.num_class_images = len(self.class_images_path)
             self._length = max(self.num_class_images, self.num_instance_images)
             self.class_prompt = class_prompt
@@ -624,6 +633,13 @@ def main(args):
     if accelerator.is_main_process:
         accelerator.init_trackers("dreambooth", config=vars(args))
 
+    
+    if args.save_epochs > 0:
+        args.save_steps = len(train_dataloader) * args.save_epochs
+        # args.max_train_steps = math.ceil(args.max_train_steps / args.save_steps) * args.save_steps
+        print(f"set --save_steps to {args.save_steps}")
+        # print(f"set --max_train_steps to {args.max_train_steps}")
+
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -732,6 +748,25 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                if global_step % args.save_steps == 0:
+                        # When 'keep_fp32_wrapper' is `False` (the default), then the models are
+                        # unwrapped and the mixed precision hooks are removed, so training crashes
+                        # when the unwrapped models are used for further training.
+                        # This is only supported in newer versions of `accelerate`.
+                        # TODO(Pedro, Suraj): Remove `accepts_keep_fp32_wrapper` when forcing newer accelerate versions
+                        accepts_keep_fp32_wrapper = "keep_fp32_wrapper" in set(
+                            inspect.signature(accelerator.unwrap_model).parameters.keys()
+                        )
+                        extra_args = {"keep_fp32_wrapper": True} if accepts_keep_fp32_wrapper else {}
+                        pipeline = DiffusionPipeline.from_pretrained(
+                            args.pretrained_model_name_or_path,
+                            unet=accelerator.unwrap_model(unet, **extra_args),
+                            text_encoder=accelerator.unwrap_model(text_encoder, **extra_args),
+                            revision=args.revision,
+                        )
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        pipeline.save_pretrained(save_path)
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
