@@ -5,6 +5,7 @@ import itertools
 import math
 import os
 import warnings
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -749,28 +750,30 @@ def main(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                if global_step % args.save_steps == 0:
-                        # When 'keep_fp32_wrapper' is `False` (the default), then the models are
-                        # unwrapped and the mixed precision hooks are removed, so training crashes
-                        # when the unwrapped models are used for further training.
-                        # This is only supported in newer versions of `accelerate`.
-                        # TODO(Pedro, Suraj): Remove `accepts_keep_fp32_wrapper` when forcing newer accelerate versions
-                        accepts_keep_fp32_wrapper = "keep_fp32_wrapper" in set(
-                            inspect.signature(accelerator.unwrap_model).parameters.keys()
-                        )
-                        extra_args = {"keep_fp32_wrapper": True} if accepts_keep_fp32_wrapper else {}
-                        pipeline = DiffusionPipeline.from_pretrained(
-                            args.pretrained_model_name_or_path,
-                            unet=accelerator.unwrap_model(unet, **extra_args),
-                            text_encoder=accelerator.unwrap_model(text_encoder, **extra_args),
-                            revision=args.revision,
-                        )
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        pipeline.save_pretrained(save_path)
+                if global_step % args.save_steps == 0 and accelerator.is_main_process:
+                    # When 'keep_fp32_wrapper' is `False` (the default), then the models are
+                    # unwrapped and the mixed precision hooks are removed, so training crashes
+                    # when the unwrapped models are used for further training.
+                    # This is only supported in newer versions of `accelerate`.
+                    # TODO(Pedro, Suraj): Remove `accepts_keep_fp32_wrapper` when forcing newer accelerate versions
+                    accepts_keep_fp32_wrapper = "keep_fp32_wrapper" in set(
+                        inspect.signature(accelerator.unwrap_model).parameters.keys()
+                    )
+                    extra_args = {"keep_fp32_wrapper": True} if accepts_keep_fp32_wrapper else {}
+                    pipeline = DiffusionPipeline.from_pretrained(
+                        args.pretrained_model_name_or_path,
+                        unet=accelerator.unwrap_model(unet, **extra_args),
+                        text_encoder=accelerator.unwrap_model(text_encoder, **extra_args),
+                        revision=args.revision,
+                    )
+                    save_path = os.path.join(args.output_dir, f"save-{global_step}")
+                    print(f"saving {save_path}")
+                    pipeline.save_pretrained(save_path)
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        print(f"saving {save_path}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
@@ -800,5 +803,6 @@ def main(args):
 
 
 if __name__ == "__main__":
+    logger.setLevel(logging.INFO)
     args = parse_args()
     main(args)
